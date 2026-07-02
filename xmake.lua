@@ -7,8 +7,8 @@ set_warnings("all")
 
 target("capitalizer")
     set_kind("binary")
-    add_files("src/main.cpp")
-    add_syslinks("user32", "shell32", "advapi32", "winmm")
+    add_files("src/main.cpp", "src/capitalizer.rc")
+    add_syslinks("user32", "shell32", "advapi32", "winmm", "comctl32")
 
     -- Statically link the CRT so the .exe is a standalone background utility
     -- that does not require the VC++ redistributable on the target machine.

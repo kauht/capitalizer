@@ -3,17 +3,26 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <timeapi.h>
 #include <cwchar>
 #include <string>
+#include "resource.h"
+
+// Enable Common Controls v6 so the dialog and its Hot Key controls use the
+// modern Windows theme.
+#pragma comment(linker, "/manifestdependency:\"type='win32' "               \
+    "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' "           \
+    "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
 
 constexpr wchar_t kClassName[] = L"CapitalizerWndClass";
 constexpr wchar_t kAppName[]   = L"Capitalizer";
 constexpr wchar_t kRunValue[]  = L"Capitalizer";
-constexpr wchar_t kRunKey[]    = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kMutexName[] = L"CapitalizerSingleInstance_{7b3f0c11-1a2b-4c3d-9e0f-abc123456789}";
+constexpr wchar_t kRunKey[]      = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kSettingsKey[] = L"Software\\Capitalizer";
+constexpr wchar_t kMutexName[]   = L"CapitalizerSingleInstance_{7b3f0c11-1a2b-4c3d-9e0f-abc123456789}";
 
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 
@@ -27,10 +36,15 @@ enum {
     ID_EXIT,
 };
 
-HWND            g_hwnd       = nullptr;
-NOTIFYICONDATAW g_nid        = {};
-bool            g_busy       = false;
-UINT            g_taskbarMsg = 0;
+HWND            g_hwnd        = nullptr;
+NOTIFYICONDATAW g_nid         = {};
+bool            g_busy        = false;
+bool            g_settingsOpen = false;
+UINT            g_taskbarMsg  = 0;
+
+// Current hotkeys (MOD_* flags without MOD_NOREPEAT). Defaults: Page Up / Page Down.
+UINT g_upperVk = VK_PRIOR, g_upperMods = 0;
+UINT g_lowerVk = VK_NEXT,  g_lowerMods = 0;
 
 std::wstring MapCase(const std::wstring& s, DWORD flags) {
     if (s.empty()) return s;
@@ -284,26 +298,147 @@ void ShowTrayMenu() {
     DestroyMenu(menu);
 }
 
-void RegisterHotkeys() {
-    const UINT mod = MOD_NOREPEAT;
-    struct { int id; UINT vk; const wchar_t* name; } keys[] = {
-        {HK_UPPER, VK_PRIOR, L"Page Up"},
-        {HK_LOWER, VK_NEXT,  L"Page Down"},
+void LoadHotkeys() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return;
+    auto read = [&](const wchar_t* name, UINT& out) {
+        DWORD d = 0, size = sizeof(d), type = 0;
+        if (RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&d), &size)
+                == ERROR_SUCCESS && type == REG_DWORD)
+            out = d;
     };
-    std::wstring failed;
-    for (auto& k : keys) {
-        if (!RegisterHotKey(g_hwnd, k.id, mod, k.vk)) {
-            if (!failed.empty()) failed += L", ";
-            failed += k.name;
-        }
+    read(L"UpperVk", g_upperVk);   read(L"UpperMods", g_upperMods);
+    read(L"LowerVk", g_lowerVk);   read(L"LowerMods", g_lowerMods);
+    RegCloseKey(key);
+}
+
+void SaveHotkeys() {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    auto write = [&](const wchar_t* name, UINT val) {
+        const DWORD d = val;
+        RegSetValueExW(key, name, 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&d), sizeof(d));
+    };
+    write(L"UpperVk", g_upperVk);   write(L"UpperMods", g_upperMods);
+    write(L"LowerVk", g_lowerVk);   write(L"LowerMods", g_lowerMods);
+    RegCloseKey(key);
+}
+
+void RegisterHotkeys() {
+    RegisterHotKey(g_hwnd, HK_UPPER, g_upperMods | MOD_NOREPEAT, g_upperVk);
+    RegisterHotKey(g_hwnd, HK_LOWER, g_lowerMods | MOD_NOREPEAT, g_lowerVk);
+}
+
+// The Hot Key control speaks HOTKEYF_* flags; RegisterHotKey wants MOD_*.
+UINT HotkeyfToMod(BYTE hkf) {
+    UINT m = 0;
+    if (hkf & HOTKEYF_ALT)     m |= MOD_ALT;
+    if (hkf & HOTKEYF_CONTROL) m |= MOD_CONTROL;
+    if (hkf & HOTKEYF_SHIFT)   m |= MOD_SHIFT;
+    return m;
+}
+
+BYTE ModToHotkeyf(UINT mods) {
+    BYTE h = 0;
+    if (mods & MOD_ALT)     h |= HOTKEYF_ALT;
+    if (mods & MOD_CONTROL) h |= HOTKEYF_CONTROL;
+    if (mods & MOD_SHIFT)   h |= HOTKEYF_SHIFT;
+    return h;
+}
+
+// Navigation keys are "extended"; the Hot Key control needs HOTKEYF_EXT to show
+// their proper name (e.g. "Page Up" instead of "Num 9").
+bool IsExtendedVk(UINT vk) {
+    switch (vk) {
+        case VK_PRIOR: case VK_NEXT:  case VK_END:    case VK_HOME:
+        case VK_LEFT:  case VK_UP:    case VK_RIGHT:  case VK_DOWN:
+        case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_NUMLOCK:
+            return true;
+        default:
+            return false;
     }
-    if (!failed.empty()) {
+}
+
+// Try to register new hotkeys; on any failure roll back to the current ones.
+bool ApplyHotkeys(UINT uVk, UINT uMods, UINT lVk, UINT lMods) {
+    if (uVk == 0 || lVk == 0) {
+        MessageBoxW(nullptr, L"Please choose a key for both hotkeys.",
+                    kAppName, MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    UnregisterHotKey(g_hwnd, HK_UPPER);
+    UnregisterHotKey(g_hwnd, HK_LOWER);
+    const bool ok1 = RegisterHotKey(g_hwnd, HK_UPPER, uMods | MOD_NOREPEAT, uVk);
+    const bool ok2 = RegisterHotKey(g_hwnd, HK_LOWER, lMods | MOD_NOREPEAT, lVk);
+    if (!ok1 || !ok2) {
+        if (ok1) UnregisterHotKey(g_hwnd, HK_UPPER);
+        if (ok2) UnregisterHotKey(g_hwnd, HK_LOWER);
+        RegisterHotkeys();   // restore the previous (still-current) globals
         MessageBoxW(nullptr,
-            (L"Some hotkeys are already in use by another program and could not "
-             L"be registered:\n\n" + failed +
-             L"\n\nCapitalizer will keep running; the other hotkeys still work.").c_str(),
-            L"Capitalizer", MB_OK | MB_ICONWARNING);
+            L"That shortcut is already in use, or both hotkeys are the same. "
+            L"Keeping your previous hotkeys.",
+            kAppName, MB_OK | MB_ICONWARNING);
+        return false;
     }
+    g_upperVk = uVk; g_upperMods = uMods;
+    g_lowerVk = lVk; g_lowerMods = lMods;
+    SaveHotkeys();
+    return true;
+}
+
+INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
+    switch (msg) {
+        case WM_INITDIALOG: {
+            SendMessageW(dlg, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(LoadIconW(nullptr, IDI_APPLICATION)));
+            BYTE uh = ModToHotkeyf(g_upperMods);
+            BYTE lh = ModToHotkeyf(g_lowerMods);
+            if (IsExtendedVk(g_upperVk)) uh |= HOTKEYF_EXT;
+            if (IsExtendedVk(g_lowerVk)) lh |= HOTKEYF_EXT;
+            SendDlgItemMessageW(dlg, IDC_HK_UPPER, HKM_SETHOTKEY, MAKEWORD(g_upperVk, uh), 0);
+            SendDlgItemMessageW(dlg, IDC_HK_LOWER, HKM_SETHOTKEY, MAKEWORD(g_lowerVk, lh), 0);
+            CheckDlgButton(dlg, IDC_AUTOSTART,
+                           IsAutostartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDOK: {
+                    const WORD u = static_cast<WORD>(
+                        SendDlgItemMessageW(dlg, IDC_HK_UPPER, HKM_GETHOTKEY, 0, 0));
+                    const WORD l = static_cast<WORD>(
+                        SendDlgItemMessageW(dlg, IDC_HK_LOWER, HKM_GETHOTKEY, 0, 0));
+                    if (ApplyHotkeys(LOBYTE(u), HotkeyfToMod(HIBYTE(u)),
+                                     LOBYTE(l), HotkeyfToMod(HIBYTE(l)))) {
+                        SetAutostart(IsDlgButtonChecked(dlg, IDC_AUTOSTART) == BST_CHECKED);
+                        EndDialog(dlg, IDOK);
+                    }
+                    return TRUE;
+                }
+                case IDCANCEL:
+                    EndDialog(dlg, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+    }
+    return FALSE;
+}
+
+void ShowSettings() {
+    if (g_settingsOpen) return;   // one dialog at a time
+    g_settingsOpen = true;
+    DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS),
+                    g_hwnd, SettingsProc, 0);
+    g_settingsOpen = false;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -314,11 +449,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_TRAYICON:
             switch (LOWORD(lParam)) {
+                case WM_LBUTTONUP:   ShowSettings(); break;
                 case WM_RBUTTONUP:
-                case WM_CONTEXTMENU:
-                case WM_LBUTTONUP:
-                    ShowTrayMenu();
-                    break;
+                case WM_CONTEXTMENU: ShowTrayMenu(); break;
             }
             return 0;
 
@@ -354,6 +487,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                     kAppName, MB_OK | MB_ICONINFORMATION);
         return 0;
     }
+
+    SetProcessDPIAware();
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES };
+    InitCommonControlsEx(&icc);
+    LoadHotkeys();
 
     g_taskbarMsg = RegisterWindowMessageW(L"TaskbarCreated");
 

@@ -24,7 +24,6 @@ constexpr int HK_LOWER = static_cast<int>(Mode::Lower);
 
 enum {
     ID_AUTOSTART = 2001,
-    ID_HELP,
     ID_EXIT,
 };
 
@@ -273,15 +272,9 @@ void ShowTrayMenu() {
     GetCursorPos(&pt);
 
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Select text, then press:");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"   Page Up      UPPERCASE");
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"   Page Down    lowercase");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 ID_AUTOSTART, L"Start with Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ID_HELP, L"Help / About");
     AppendMenuW(menu, MF_STRING, ID_EXIT, L"Exit");
 
     SetForegroundWindow(g_hwnd);
@@ -289,19 +282,6 @@ void ShowTrayMenu() {
                    pt.x, pt.y, 0, g_hwnd, nullptr);
     PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
-}
-
-void ShowHelp() {
-    MessageBoxW(nullptr,
-        L"Capitalizer transforms the CURRENTLY SELECTED text.\n\n"
-        L"Select text, then press:\n"
-        L"    Page Up      UPPERCASE\n"
-        L"    Page Down    lowercase\n\n"
-        L"In standard Windows text fields (native Edit / RichEdit) it edits the "
-        L"selection directly with Win32 messages. In apps that draw their own text "
-        L"(browsers, Electron/VS Code, UWP) it falls back to copy/transform/paste, "
-        L"then restores your previous clipboard.",
-        L"Capitalizer — Help", MB_OK | MB_ICONINFORMATION);
 }
 
 void RegisterHotkeys() {
@@ -345,7 +325,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case ID_AUTOSTART: SetAutostart(!IsAutostartEnabled()); break;
-                case ID_HELP:      ShowHelp();                          break;
                 case ID_EXIT:      DestroyWindow(hwnd);                 break;
             }
             return 0;

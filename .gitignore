@@ -1,0 +1,9 @@
+# xmake
+/build/
+/.xmake/
+
+# Editors / OS
+.vs/
+.vscode/
+*.user
+Thumbs.db

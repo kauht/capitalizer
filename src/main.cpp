@@ -277,8 +277,10 @@ void AddTrayIcon() {
     g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
-    lstrcpynW(g_nid.szTip, L"Capitalizer — Page Up = UPPERCASE, Page Down = lowercase", 128);
+    lstrcpynW(g_nid.szTip, L"Capitalizer — left-click for settings", 128);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
+    g_nid.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
 }
 
 void ShowTrayMenu() {
@@ -395,6 +397,7 @@ INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
         case WM_INITDIALOG: {
             SendMessageW(dlg, WM_SETICON, ICON_SMALL,
                          reinterpret_cast<LPARAM>(LoadIconW(nullptr, IDI_APPLICATION)));
+            SetForegroundWindow(dlg);
             BYTE uh = ModToHotkeyf(g_upperMods);
             BYTE lh = ModToHotkeyf(g_lowerMods);
             if (IsExtendedVk(g_upperVk)) uh |= HOTKEYF_EXT;
@@ -449,9 +452,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_TRAYICON:
             switch (LOWORD(lParam)) {
+                case NIN_SELECT:
                 case WM_LBUTTONUP:   ShowSettings(); break;
-                case WM_RBUTTONUP:
-                case WM_CONTEXTMENU: ShowTrayMenu(); break;
+                case WM_CONTEXTMENU:
+                case WM_RBUTTONUP:   ShowTrayMenu(); break;
             }
             return 0;
 

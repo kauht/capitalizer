@@ -7,3 +7,7 @@
 .vscode/
 *.user
 Thumbs.db
+
+# Agent instructions (local only)
+AGENTS.md
+agents.md

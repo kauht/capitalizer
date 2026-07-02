@@ -15,8 +15,7 @@ constexpr wchar_t kRunValue[]  = L"Capitalizer";
 constexpr wchar_t kRunKey[]    = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kMutexName[] = L"CapitalizerSingleInstance_{7b3f0c11-1a2b-4c3d-9e0f-abc123456789}";
 
-constexpr UINT WM_TRAYICON    = WM_APP + 1;
-constexpr UINT WM_DOTRANSFORM = WM_APP + 2;
+constexpr UINT WM_TRAYICON = WM_APP + 1;
 
 enum class Mode { Upper, Lower };
 
@@ -24,20 +23,15 @@ constexpr int HK_UPPER = static_cast<int>(Mode::Upper);
 constexpr int HK_LOWER = static_cast<int>(Mode::Lower);
 
 enum {
-    ID_TOGGLE_RCLICK = 2001,
-    ID_AUTOSTART,
+    ID_AUTOSTART = 2001,
     ID_HELP,
     ID_EXIT,
 };
 
-HWND            g_hwnd          = nullptr;
-HINSTANCE       g_hinst         = nullptr;
-NOTIFYICONDATAW g_nid           = {};
-HHOOK           g_mouseHook     = nullptr;
-bool            g_rclickEnabled = false;
-bool            g_swallowRUp    = false;
-bool            g_busy          = false;
-UINT            g_taskbarMsg    = 0;
+HWND            g_hwnd       = nullptr;
+NOTIFYICONDATAW g_nid        = {};
+bool            g_busy       = false;
+UINT            g_taskbarMsg = 0;
 
 std::wstring MapCase(const std::wstring& s, DWORD flags) {
     if (s.empty()) return s;
@@ -236,35 +230,6 @@ void DoTransform(Mode mode) {
     g_busy = false;
 }
 
-LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code == HC_ACTION) {
-        if (wParam == WM_RBUTTONDOWN) {
-            const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool shift = (GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0;
-            if (ctrl && shift) {
-                g_swallowRUp = true;
-                PostMessageW(g_hwnd, WM_DOTRANSFORM, static_cast<WPARAM>(Mode::Upper), 0);
-                return 1;
-            }
-        } else if (wParam == WM_RBUTTONUP && g_swallowRUp) {
-            g_swallowRUp = false;
-            return 1;
-        }
-    }
-    return CallNextHookEx(nullptr, code, wParam, lParam);
-}
-
-void SetRightClickHook(bool enable) {
-    if (enable && !g_mouseHook) {
-        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, g_hinst, 0);
-        g_rclickEnabled = (g_mouseHook != nullptr);
-    } else if (!enable && g_mouseHook) {
-        UnhookWindowsHookEx(g_mouseHook);
-        g_mouseHook = nullptr;
-        g_rclickEnabled = false;
-    }
-}
-
 bool IsAutostartEnabled() {
     HKEY key;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
@@ -313,8 +278,6 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"   Page Up      UPPERCASE");
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"   Page Down    lowercase");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (g_rclickEnabled ? MF_CHECKED : MF_UNCHECKED),
-                ID_TOGGLE_RCLICK, L"Ctrl+Shift+Right-Click → UPPERCASE");
     AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 ID_AUTOSTART, L"Start with Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -334,7 +297,6 @@ void ShowHelp() {
         L"Select text, then press:\n"
         L"    Page Up      UPPERCASE\n"
         L"    Page Down    lowercase\n\n"
-        L"Optional (tray menu): Ctrl+Shift+Right-Click a selection to UPPERCASE it.\n\n"
         L"In standard Windows text fields (native Edit / RichEdit) it edits the "
         L"selection directly with Win32 messages. In apps that draw their own text "
         L"(browsers, Electron/VS Code, UWP) it falls back to copy/transform/paste, "
@@ -370,10 +332,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DoTransform(static_cast<Mode>(wParam));
             return 0;
 
-        case WM_DOTRANSFORM:
-            DoTransform(static_cast<Mode>(wParam));
-            return 0;
-
         case WM_TRAYICON:
             switch (LOWORD(lParam)) {
                 case WM_RBUTTONUP:
@@ -386,15 +344,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
-                case ID_TOGGLE_RCLICK: SetRightClickHook(!g_rclickEnabled);   break;
-                case ID_AUTOSTART:     SetAutostart(!IsAutostartEnabled());   break;
-                case ID_HELP:          ShowHelp();                            break;
-                case ID_EXIT:          DestroyWindow(hwnd);                   break;
+                case ID_AUTOSTART: SetAutostart(!IsAutostartEnabled()); break;
+                case ID_HELP:      ShowHelp();                          break;
+                case ID_EXIT:      DestroyWindow(hwnd);                 break;
             }
             return 0;
 
         case WM_DESTROY:
-            SetRightClickHook(false);
             for (int id : {HK_UPPER, HK_LOWER})
                 UnregisterHotKey(hwnd, id);
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
@@ -413,8 +369,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
-    g_hinst = hInstance;
-
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"Capitalizer is already running (see the system tray).",

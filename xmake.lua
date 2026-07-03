@@ -7,7 +7,7 @@ set_warnings("all")
 
 target("capitalizer")
     set_kind("binary")
-    add_files("src/*.cpp", "src/utils/*.cpp", "src/app.rc")
+    add_files("src/**.cpp", "src/app.rc")
     add_includedirs("src")
 
     -- Vendored WebView2 SDK (headers + dynamic loader import lib).
@@ -20,7 +20,8 @@ target("capitalizer")
 
     set_runtimes(is_mode("debug") and "MTd" or "MT")
 
-    add_defines("UNICODE", "_UNICODE", "WIN32_LEAN_AND_MEAN", "NOMINMAX")
+    add_defines("UNICODE", "_UNICODE", "WIN32_LEAN_AND_MEAN", "NOMINMAX",
+                "WINVER=0x0A00", "_WIN32_WINNT=0x0A00")
     add_cxflags("/utf-8")
 
     -- GUI subsystem: no console window pops up when it runs in the background.

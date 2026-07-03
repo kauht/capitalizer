@@ -7,14 +7,25 @@ set_warnings("all")
 
 target("capitalizer")
     set_kind("binary")
-    add_files("src/main.cpp", "src/capitalizer.rc")
-    add_syslinks("user32", "shell32", "advapi32", "winmm", "comctl32")
+    add_files("src/main.cpp")
 
-    -- Statically link the CRT so the .exe is a standalone background utility
-    -- that does not require the VC++ redistributable on the target machine.
+    -- Vendored WebView2 SDK (headers + dynamic loader import lib).
+    add_includedirs("third_party/webview2/include")
+    add_linkdirs("third_party/webview2/lib")
+    add_links("WebView2Loader.dll")
+
+    add_syslinks("user32", "shell32", "advapi32", "winmm", "dwmapi",
+                 "ole32", "oleaut32", "version")
+
     set_runtimes(is_mode("debug") and "MTd" or "MT")
 
     add_defines("UNICODE", "_UNICODE", "WIN32_LEAN_AND_MEAN", "NOMINMAX")
+    add_cxflags("/utf-8")
 
     -- GUI subsystem: no console window pops up when it runs in the background.
     add_ldflags("/subsystem:windows", {force = true})
+
+    -- WebView2Loader.dll must sit next to the .exe at runtime.
+    after_build(function (target)
+        os.cp("third_party/webview2/lib/WebView2Loader.dll", target:targetdir())
+    end)

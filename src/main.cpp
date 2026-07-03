@@ -3,17 +3,35 @@
 
 #include <windows.h>
 #include <shellapi.h>
-#include <commctrl.h>
+#include <dwmapi.h>
 #include <timeapi.h>
+#include <wrl.h>
+#include <WebView2.h>
 #include <cwchar>
 #include <string>
-#include "resource.h"
 
-// Enable Common Controls v6 so the dialog and its Hot Key controls use the
-// modern Windows theme.
 #pragma comment(linker, "/manifestdependency:\"type='win32' "               \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' "           \
     "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+#ifndef DWMSBT_MAINWINDOW
+#define DWMSBT_MAINWINDOW 2
+#endif
+#ifndef DWMSBT_TRANSIENTWINDOW
+#define DWMSBT_TRANSIENTWINDOW 3
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
 
 namespace {
 
@@ -39,7 +57,6 @@ enum {
 HWND            g_hwnd        = nullptr;
 NOTIFYICONDATAW g_nid         = {};
 bool            g_busy        = false;
-bool            g_settingsOpen = false;
 UINT            g_taskbarMsg  = 0;
 
 // Current hotkeys (MOD_* flags without MOD_NOREPEAT). Defaults: Page Up / Page Down.
@@ -335,36 +352,6 @@ void RegisterHotkeys() {
     RegisterHotKey(g_hwnd, HK_LOWER, g_lowerMods | MOD_NOREPEAT, g_lowerVk);
 }
 
-// The Hot Key control speaks HOTKEYF_* flags; RegisterHotKey wants MOD_*.
-UINT HotkeyfToMod(BYTE hkf) {
-    UINT m = 0;
-    if (hkf & HOTKEYF_ALT)     m |= MOD_ALT;
-    if (hkf & HOTKEYF_CONTROL) m |= MOD_CONTROL;
-    if (hkf & HOTKEYF_SHIFT)   m |= MOD_SHIFT;
-    return m;
-}
-
-BYTE ModToHotkeyf(UINT mods) {
-    BYTE h = 0;
-    if (mods & MOD_ALT)     h |= HOTKEYF_ALT;
-    if (mods & MOD_CONTROL) h |= HOTKEYF_CONTROL;
-    if (mods & MOD_SHIFT)   h |= HOTKEYF_SHIFT;
-    return h;
-}
-
-// Navigation keys are "extended"; the Hot Key control needs HOTKEYF_EXT to show
-// their proper name (e.g. "Page Up" instead of "Num 9").
-bool IsExtendedVk(UINT vk) {
-    switch (vk) {
-        case VK_PRIOR: case VK_NEXT:  case VK_END:    case VK_HOME:
-        case VK_LEFT:  case VK_UP:    case VK_RIGHT:  case VK_DOWN:
-        case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_NUMLOCK:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // Try to register new hotkeys; on any failure roll back to the current ones.
 bool ApplyHotkeys(UINT uVk, UINT uMods, UINT lVk, UINT lMods) {
     if (uVk == 0 || lVk == 0) {
@@ -392,56 +379,294 @@ bool ApplyHotkeys(UINT uVk, UINT uMods, UINT lVk, UINT lMods) {
     return true;
 }
 
-INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
-    switch (msg) {
-        case WM_INITDIALOG: {
-            SendMessageW(dlg, WM_SETICON, ICON_SMALL,
-                         reinterpret_cast<LPARAM>(LoadIconW(nullptr, IDI_APPLICATION)));
-            SetForegroundWindow(dlg);
-            BYTE uh = ModToHotkeyf(g_upperMods);
-            BYTE lh = ModToHotkeyf(g_lowerMods);
-            if (IsExtendedVk(g_upperVk)) uh |= HOTKEYF_EXT;
-            if (IsExtendedVk(g_lowerVk)) lh |= HOTKEYF_EXT;
-            SendDlgItemMessageW(dlg, IDC_HK_UPPER, HKM_SETHOTKEY, MAKEWORD(g_upperVk, uh), 0);
-            SendDlgItemMessageW(dlg, IDC_HK_LOWER, HKM_SETHOTKEY, MAKEWORD(g_lowerVk, lh), 0);
-            CheckDlgButton(dlg, IDC_AUTOSTART,
-                           IsAutostartEnabled() ? BST_CHECKED : BST_UNCHECKED);
-            return TRUE;
-        }
+constexpr wchar_t kSettingsClass[] = L"CapitalizerSettingsWnd";
 
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
-                case IDOK: {
-                    const WORD u = static_cast<WORD>(
-                        SendDlgItemMessageW(dlg, IDC_HK_UPPER, HKM_GETHOTKEY, 0, 0));
-                    const WORD l = static_cast<WORD>(
-                        SendDlgItemMessageW(dlg, IDC_HK_LOWER, HKM_GETHOTKEY, 0, 0));
-                    if (ApplyHotkeys(LOBYTE(u), HotkeyfToMod(HIBYTE(u)),
-                                     LOBYTE(l), HotkeyfToMod(HIBYTE(l)))) {
-                        SetAutostart(IsDlgButtonChecked(dlg, IDC_AUTOSTART) == BST_CHECKED);
-                        EndDialog(dlg, IDOK);
-                    }
-                    return TRUE;
-                }
-                case IDCANCEL:
-                    EndDialog(dlg, IDCANCEL);
-                    return TRUE;
+using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Callback;
+
+HWND g_settingsHwnd = nullptr;
+ComPtr<ICoreWebView2Controller> g_webController;
+ComPtr<ICoreWebView2>           g_webView;
+
+constexpr wchar_t kSettingsHtml[] = LR"HTML(<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  color: #e6e6ea; background: transparent; overflow: hidden;
+  user-select: none; -webkit-user-select: none;
+}
+.panel { height: 100%; display: flex; flex-direction: column;
+  padding: 20px 22px 16px; background: rgba(20,20,24,0.12); }
+.header { margin-bottom: 12px; }
+.title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+.subtitle { font-size: 12px; color: #9a9aa4; margin-top: 3px; }
+.rows { display: flex; flex-direction: column; }
+.row { display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.label { font-size: 13px; color: #d6d6db; }
+.hk { min-width: 170px; text-align: center; font-size: 12.5px; color: #e6e6ea;
+  padding: 8px 12px; background: rgba(255,255,255,0.055);
+  border: 1px solid rgba(255,255,255,0.09); border-radius: 8px; cursor: pointer;
+  transition: background .12s, border-color .12s; outline: none; }
+.hk:hover { background: rgba(255,255,255,0.09); }
+.hk.capturing { border-color: #4c9bf5; background: rgba(76,155,245,0.14); color: #bcd8fb; }
+.toggle { width: 42px; height: 24px; border-radius: 999px; background: rgba(255,255,255,0.16);
+  position: relative; cursor: pointer; transition: background .16s; outline: none; }
+.toggle .knob { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; transition: transform .16s; box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+.toggle.on { background: #2c7df0; }
+.toggle.on .knob { transform: translateX(18px); }
+.footer { margin-top: auto; padding-top: 14px; display: flex; align-items: center; gap: 8px; }
+.hint { font-size: 11px; color: #6f6f78; margin-right: auto; }
+.btn { font-family: inherit; font-size: 13px; padding: 7px 18px; border-radius: 8px; border: none;
+  background: rgba(255,255,255,0.08); color: #e6e6ea; cursor: pointer; transition: background .12s; }
+.btn:hover { background: rgba(255,255,255,0.14); }
+.btn.primary { background: #2c7df0; color: #fff; }
+.btn.primary:hover { background: #3b8bff; }
+</style></head><body>
+<div class="panel">
+  <div class="header">
+    <div class="title">Capitalizer</div>
+    <div class="subtitle">Set the hotkeys that change your selected text's case.</div>
+  </div>
+  <div class="rows">
+    <div class="row"><div class="label">UPPERCASE</div><div class="hk" id="hkU" tabindex="0">Unset</div></div>
+    <div class="row"><div class="label">lowercase</div><div class="hk" id="hkL" tabindex="0">Unset</div></div>
+    <div class="row" style="border-bottom:none"><div class="label">Start with Windows</div>
+      <div class="toggle" id="tg" tabindex="0"><div class="knob"></div></div></div>
+  </div>
+  <div class="footer">
+    <div class="hint">Click a field, then press your shortcut</div>
+    <button class="btn" id="cancel">Cancel</button>
+    <button class="btn primary" id="save">Save</button>
+  </div>
+</div>
+<script>
+var vp = window.chrome.webview;
+var st = { hkU:{vk:0,mods:0}, hkL:{vk:0,mods:0}, autostart:false };
+var capturing = null;
+function keyName(vk){
+  var m={8:'Backspace',9:'Tab',13:'Enter',20:'Caps Lock',27:'Esc',32:'Space',
+    33:'Page Up',34:'Page Down',35:'End',36:'Home',37:'Left',38:'Up',39:'Right',40:'Down',
+    45:'Insert',46:'Delete',
+    112:'F1',113:'F2',114:'F3',115:'F4',116:'F5',117:'F6',118:'F7',119:'F8',120:'F9',121:'F10',122:'F11',123:'F12',
+    186:';',187:'=',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\',221:']',222:"'"};
+  if(m[vk]) return m[vk];
+  if(vk>=65&&vk<=90) return String.fromCharCode(vk);
+  if(vk>=48&&vk<=57) return String.fromCharCode(vk);
+  if(vk>=96&&vk<=105) return 'Num '+(vk-96);
+  return 'Key '+vk;
+}
+function combo(o){
+  if(!o.vk) return 'Unset';
+  var s='';
+  if(o.mods&2) s+='Ctrl + ';
+  if(o.mods&1) s+='Alt + ';
+  if(o.mods&4) s+='Shift + ';
+  return s+keyName(o.vk);
+}
+function render(){
+  var u=document.getElementById('hkU'), l=document.getElementById('hkL'), t=document.getElementById('tg');
+  u.textContent = capturing==='hkU' ? 'Press a key...' : combo(st.hkU);
+  l.textContent = capturing==='hkL' ? 'Press a key...' : combo(st.hkL);
+  u.classList.toggle('capturing', capturing==='hkU');
+  l.classList.toggle('capturing', capturing==='hkL');
+  t.classList.toggle('on', st.autostart);
+}
+function startCap(w){ capturing=w; render(); document.getElementById(w).focus(); }
+function stopCap(){ capturing=null; render(); }
+document.getElementById('hkU').onclick=function(){ startCap('hkU'); };
+document.getElementById('hkL').onclick=function(){ startCap('hkL'); };
+document.getElementById('tg').onclick=function(){ st.autostart=!st.autostart; render(); };
+document.getElementById('save').onclick=doSave;
+document.getElementById('cancel').onclick=function(){ vp.postMessage('cancel'); };
+function doSave(){ vp.postMessage('save|'+st.hkU.vk+'|'+st.hkU.mods+'|'+st.hkL.vk+'|'+st.hkL.mods+'|'+(st.autostart?1:0)); }
+document.addEventListener('keydown', function(e){
+  if(capturing){
+    e.preventDefault();
+    var vk=e.keyCode;
+    if(vk===16||vk===17||vk===18||vk===91||vk===92) return;
+    if(vk===27){ stopCap(); return; }
+    st[capturing]={vk:vk, mods:(e.ctrlKey?2:0)|(e.altKey?1:0)|(e.shiftKey?4:0)};
+    stopCap();
+    return;
+  }
+  if(e.key==='Enter') doSave();
+  else if(e.key==='Escape') vp.postMessage('cancel');
+});
+vp.addEventListener('message', function(e){
+  var p=(''+e.data).split('|');
+  if(p[0]==='init'){
+    st.hkU={vk:+p[1],mods:+p[2]};
+    st.hkL={vk:+p[3],mods:+p[4]};
+    st.autostart=(p[5]==='1');
+    render();
+  }
+});
+render();
+vp.postMessage('ready');
+</script>
+</body></html>)HTML";
+
+struct ACCENT_POLICY { int state; int flags; unsigned gradient; int anim; };
+struct WINCOMPATTRDATA { int attrib; void* data; size_t size; };
+using SetWindowCompositionAttributeFn = BOOL (WINAPI*)(HWND, WINCOMPATTRDATA*);
+
+void ApplyAcrylic(HWND hwnd) {
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    int corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        auto setca = reinterpret_cast<SetWindowCompositionAttributeFn>(
+            GetProcAddress(user32, "SetWindowCompositionAttribute"));
+        if (setca) {
+            ACCENT_POLICY accent = { 4, 0, 0xB0161618, 0 };  // acrylic blur + dark ABGR tint
+            WINCOMPATTRDATA data = { 19, &accent, sizeof(accent) };
+            setca(hwnd, &data);
+        }
+    }
+}
+
+void SendInitToWeb() {
+    if (!g_webView) return;
+    wchar_t buf[128];
+    swprintf_s(buf, L"init|%u|%u|%u|%u|%d",
+               g_upperVk, g_upperMods, g_lowerVk, g_lowerMods, IsAutostartEnabled() ? 1 : 0);
+    g_webView->PostWebMessageAsString(buf);
+}
+
+void OnWebMessage(LPCWSTR msg) {
+    if (wcscmp(msg, L"ready") == 0) { SendInitToWeb(); return; }
+    if (wcscmp(msg, L"cancel") == 0) { if (g_settingsHwnd) DestroyWindow(g_settingsHwnd); return; }
+    if (wcsncmp(msg, L"save|", 5) == 0) {
+        UINT uv = 0, um = 0, lv = 0, lm = 0; int as = 0;
+        if (swscanf_s(msg + 5, L"%u|%u|%u|%u|%d", &uv, &um, &lv, &lm, &as) == 5) {
+            if (ApplyHotkeys(uv, um, lv, lm)) {
+                SetAutostart(as != 0);
+                if (g_settingsHwnd) DestroyWindow(g_settingsHwnd);
             }
-            break;
+        }
+    }
+}
+
+void CreateWebView() {
+    std::wstring udf;
+    wchar_t local[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH))
+        udf = std::wstring(local) + L"\\Capitalizer";
+
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.empty() ? nullptr : udf.c_str(), nullptr,
+        Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+            [](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
+                if (!env || !g_settingsHwnd) return S_OK;
+                env->CreateCoreWebView2Controller(g_settingsHwnd,
+                    Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                        [](HRESULT, ICoreWebView2Controller* controller) -> HRESULT {
+                            if (!controller || !g_settingsHwnd) return S_OK;
+                            g_webController = controller;
+                            g_webController->get_CoreWebView2(&g_webView);
+
+                            ComPtr<ICoreWebView2Controller2> c2;
+                            if (SUCCEEDED(g_webController.As(&c2))) {
+                                COREWEBVIEW2_COLOR clear = { 0, 0, 0, 0 };
+                                c2->put_DefaultBackgroundColor(clear);
+                            }
+
+                            ComPtr<ICoreWebView2Settings> settings;
+                            g_webView->get_Settings(&settings);
+                            if (settings) {
+                                settings->put_AreDefaultContextMenusEnabled(FALSE);
+                                settings->put_IsStatusBarEnabled(FALSE);
+                                settings->put_AreDevToolsEnabled(FALSE);
+                                ComPtr<ICoreWebView2Settings3> s3;
+                                if (SUCCEEDED(settings.As(&s3)))
+                                    s3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+                            }
+
+                            EventRegistrationToken tok;
+                            g_webView->add_WebMessageReceived(
+                                Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                                        LPWSTR s = nullptr;
+                                        if (SUCCEEDED(args->TryGetWebMessageAsString(&s)) && s) {
+                                            OnWebMessage(s);
+                                            CoTaskMemFree(s);
+                                        }
+                                        return S_OK;
+                                    }).Get(), &tok);
+
+                            RECT rc;
+                            GetClientRect(g_settingsHwnd, &rc);
+                            g_webController->put_Bounds(rc);
+                            g_webView->NavigateToString(kSettingsHtml);
+                            g_webController->put_IsVisible(TRUE);
+                            return S_OK;
+                        }).Get());
+                return S_OK;
+            }).Get());
+}
+
+LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_SIZE:
+            if (g_webController) {
+                RECT rc; GetClientRect(hwnd, &rc);
+                g_webController->put_Bounds(rc);
+            }
+            return 0;
 
         case WM_CLOSE:
-            EndDialog(dlg, IDCANCEL);
-            return TRUE;
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            if (g_webController) g_webController->Close();
+            g_webController.Reset();
+            g_webView.Reset();
+            g_settingsHwnd = nullptr;
+            return 0;
     }
-    return FALSE;
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 void ShowSettings() {
-    if (g_settingsOpen) return;   // one dialog at a time
-    g_settingsOpen = true;
-    DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SETTINGS),
-                    g_hwnd, SettingsProc, 0);
-    g_settingsOpen = false;
+    if (g_settingsHwnd) {
+        SetForegroundWindow(g_settingsHwnd);
+        return;
+    }
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc   = SettingsWndProc;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kSettingsClass;
+        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    const UINT dpi = GetDpiForSystem();
+    const int w = MulDiv(480, dpi, 96);
+    const int h = MulDiv(300, dpi, 96);
+    RECT work;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int x = work.left + (work.right - work.left - w) / 2;
+    const int y = work.top + (work.bottom - work.top - h) / 2;
+
+    g_settingsHwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClass, L"Capitalizer",
+                                     WS_POPUP, x, y, w, h, nullptr, nullptr,
+                                     GetModuleHandleW(nullptr), nullptr);
+    if (!g_settingsHwnd) return;
+
+    ApplyAcrylic(g_settingsHwnd);
+    ShowWindow(g_settingsHwnd, SW_SHOW);
+    SetForegroundWindow(g_settingsHwnd);
+    CreateWebView();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -493,8 +718,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     }
 
     SetProcessDPIAware();
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES };
-    InitCommonControlsEx(&icc);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     LoadHotkeys();
 
     g_taskbarMsg = RegisterWindowMessageW(L"TaskbarCreated");

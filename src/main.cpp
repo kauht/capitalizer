@@ -10,6 +10,10 @@
 #include <cwchar>
 #include <string>
 
+#include "utils/clipboard.h"
+#include "utils/input.h"
+#include "utils/text.h"
+
 #pragma comment(linker, "/manifestdependency:\"type='win32' "               \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' "           \
     "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -19,15 +23,6 @@
 #endif
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
-#endif
-#ifndef DWMWA_SYSTEMBACKDROP_TYPE
-#define DWMWA_SYSTEMBACKDROP_TYPE 38
-#endif
-#ifndef DWMSBT_MAINWINDOW
-#define DWMSBT_MAINWINDOW 2
-#endif
-#ifndef DWMSBT_TRANSIENTWINDOW
-#define DWMSBT_TRANSIENTWINDOW 3
 #endif
 #ifndef DWMWCP_ROUND
 #define DWMWCP_ROUND 2
@@ -64,37 +59,8 @@ UINT g_upperVk = VK_PRIOR, g_upperMods = 0;
 UINT g_lowerVk = VK_NEXT,  g_lowerMods = 0;
 bool g_hkRegistered = false;
 
-std::wstring MapCase(const std::wstring& s, DWORD flags) {
-    if (s.empty()) return s;
-    const int len = LCMapStringEx(LOCALE_NAME_USER_DEFAULT, flags,
-                                  s.c_str(), static_cast<int>(s.size()),
-                                  nullptr, 0, nullptr, nullptr, 0);
-    if (len <= 0) return s;
-    std::wstring out(static_cast<size_t>(len), L'\0');
-    LCMapStringEx(LOCALE_NAME_USER_DEFAULT, flags,
-                  s.c_str(), static_cast<int>(s.size()),
-                  out.data(), len, nullptr, nullptr, 0);
-    return out;
-}
-
 std::wstring Transform(const std::wstring& s, Mode mode) {
-    switch (mode) {
-        case Mode::Upper: return MapCase(s, LCMAP_UPPERCASE);
-        case Mode::Lower: return MapCase(s, LCMAP_LOWERCASE);
-    }
-    return s;
-}
-
-HWND GetFocusedControl() {
-    HWND fg = GetForegroundWindow();
-    if (!fg) return nullptr;
-
-    GUITHREADINFO gti = {};
-    gti.cbSize = sizeof(gti);
-    const DWORD tid = GetWindowThreadProcessId(fg, nullptr);
-    if (GetGUIThreadInfo(tid, &gti) && gti.hwndFocus)
-        return gti.hwndFocus;
-    return fg;
+    return mode == Mode::Upper ? util::ToUpper(s) : util::ToLower(s);
 }
 
 // Fast path: read/replace the selection with Win32 edit-control messages.
@@ -124,127 +90,33 @@ bool TryMessageTransform(HWND ctl, Mode mode) {
     return true;
 }
 
-bool OpenClipboardRetry() {
-    for (int i = 0; i < 200; ++i) {
-        if (OpenClipboard(g_hwnd)) return true;
-        Sleep(2);
-    }
-    return false;
-}
-
-std::wstring GetClipboardText() {
-    std::wstring result;
-    if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return result;
-    if (!OpenClipboardRetry()) return result;
-    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
-        if (const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(h))) {
-            result = p;
-            GlobalUnlock(h);
-        }
-    }
-    CloseClipboard();
-    return result;
-}
-
-bool SetClipboardText(const std::wstring& text) {
-    if (!OpenClipboardRetry()) return false;
-    EmptyClipboard();
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!h) {
-        CloseClipboard();
-        return false;
-    }
-    if (void* dst = GlobalLock(h)) {
-        memcpy(dst, text.c_str(), bytes);
-        GlobalUnlock(h);
-    }
-    const bool ok = SetClipboardData(CF_UNICODETEXT, h) != nullptr;
-    if (!ok) GlobalFree(h);
-    CloseClipboard();
-    return ok;
-}
-
-bool NeutralizeModifiers() {
-    const WORD mods[] = {
-        VK_LMENU, VK_RMENU, VK_MENU,
-        VK_LSHIFT, VK_RSHIFT, VK_SHIFT,
-        VK_LCONTROL, VK_RCONTROL, VK_CONTROL,
-        VK_LWIN, VK_RWIN,
-    };
-    INPUT in[sizeof(mods) / sizeof(mods[0])] = {};
-    int n = 0;
-    for (WORD vk : mods) {
-        if (GetAsyncKeyState(vk) & 0x8000) {
-            in[n].type       = INPUT_KEYBOARD;
-            in[n].ki.wVk     = vk;
-            in[n].ki.dwFlags = KEYEVENTF_KEYUP;
-            ++n;
-        }
-    }
-    if (n) SendInput(n, in, sizeof(INPUT));
-    return n > 0;
-}
-
-void SendCtrlKey(WORD vk) {
-    INPUT in[4] = {};
-    in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_CONTROL;
-    in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = vk;
-    in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = vk;         in[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_CONTROL; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(4, in, sizeof(INPUT));
-}
-
-bool IsEditClass(HWND h) {
-    wchar_t cls[64] = {};
-    if (GetClassNameW(h, cls, 64) <= 0) return false;
-    CharLowerW(cls);
-    return wcsstr(cls, L"edit") != nullptr;
-}
-
-// Sleep while still dispatching messages. After we write the clipboard we are
-// its owner, so when another app (e.g. a browser) empties the clipboard on its
-// next copy it SendMessage()s us WM_DESTROYCLIPBOARD; if we were blocked in a
-// plain Sleep we'd deadlock its copy. Pumping keeps us responsive. Re-entrant
-// hotkeys are guarded by g_busy, so this is safe.
-void PumpSleep(int ms) {
-    for (int waited = 0; waited < ms; waited += 5) {
-        MSG m;
-        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&m);
-            DispatchMessageW(&m);
-        }
-        MsgWaitForMultipleObjectsEx(0, nullptr, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-    }
-}
-
 // Fallback for apps with no Win32 edit control (browsers, Electron, UWP):
 // copy the selection, transform it, paste it back, restore the clipboard.
 void ClipboardTransform(Mode mode) {
     timeBeginPeriod(1);   // 1 ms timer resolution so the waits below are tight
 
-    const std::wstring saved = GetClipboardText();
+    const std::wstring saved = util::GetClipboardText(g_hwnd);
     const DWORD seqBefore = GetClipboardSequenceNumber();
 
-    if (NeutralizeModifiers()) Sleep(8);
-    SendCtrlKey('C');
+    if (util::ReleaseHeldModifiers()) Sleep(8);
+    util::SendCtrlKey('C');
 
     bool copied = false;
     for (int waited = 0; waited < 400; waited += 5) {
         if (GetClipboardSequenceNumber() != seqBefore) { copied = true; break; }
-        PumpSleep(5);
+        util::PumpSleep(5);
     }
 
     if (copied) {
-        const std::wstring selection = GetClipboardText();
+        const std::wstring selection = util::GetClipboardText(g_hwnd);
         if (!selection.empty()) {
             const std::wstring replaced = Transform(selection, mode);
-            if (SetClipboardText(replaced)) {
-                SendCtrlKey('V');
-                PumpSleep(120);   // let the paste read our text before we restore
+            if (util::SetClipboardText(g_hwnd, replaced)) {
+                util::SendCtrlKey('V');
+                util::PumpSleep(120);   // let the paste read our text before we restore
             }
         }
-        if (!saved.empty()) SetClipboardText(saved);
+        if (!saved.empty()) util::SetClipboardText(g_hwnd, saved);
     }
 
     timeEndPeriod(1);
@@ -254,8 +126,8 @@ void DoTransform(Mode mode) {
     if (g_busy) return;
     g_busy = true;
 
-    HWND ctl = GetFocusedControl();
-    if (ctl && !TryMessageTransform(ctl, mode) && !IsEditClass(ctl))
+    HWND ctl = util::FocusedControl();
+    if (ctl && !TryMessageTransform(ctl, mode) && !util::IsEditControl(ctl))
         ClipboardTransform(mode);   // only non-edit controls (browser/Electron/UWP)
 
     g_busy = false;

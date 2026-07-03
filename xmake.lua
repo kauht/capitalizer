@@ -7,11 +7,12 @@ set_warnings("all")
 
 target("capitalizer")
     set_kind("binary")
-    add_files("src/main.cpp", "src/app.rc")
+    add_files("src/*.cpp", "src/utils/*.cpp", "src/app.rc")
+    add_includedirs("src")
 
     -- Vendored WebView2 SDK (headers + dynamic loader import lib).
-    add_includedirs("third_party/webview2/include")
-    add_linkdirs("third_party/webview2/lib")
+    add_includedirs("vendor/webview2/include")
+    add_linkdirs("vendor/webview2/lib")
     add_links("WebView2Loader.dll")
 
     add_syslinks("user32", "shell32", "advapi32", "winmm", "dwmapi",
@@ -27,5 +28,5 @@ target("capitalizer")
 
     -- WebView2Loader.dll must sit next to the .exe at runtime.
     after_build(function (target)
-        os.cp("third_party/webview2/lib/WebView2Loader.dll", target:targetdir())
+        os.cp("vendor/webview2/lib/WebView2Loader.dll", target:targetdir())
     end)

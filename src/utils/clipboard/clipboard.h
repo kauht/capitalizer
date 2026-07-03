@@ -4,7 +4,7 @@
 
 namespace util {
 
-std::wstring GetClipboardText(HWND owner);
-bool SetClipboardText(HWND owner, const std::wstring& text);
+    std::wstring GetClipboardText(HWND owner);
+    bool SetClipboardText(HWND owner, const std::wstring& text);
 
 }

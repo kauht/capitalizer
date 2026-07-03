@@ -10,10 +10,10 @@ target("capitalizer")
     add_files("src/**.cpp", "src/app.rc")
     add_includedirs("src")
 
-    -- Vendored WebView2 SDK (headers + dynamic loader import lib).
+    -- Vendored WebView2 SDK, statically linked so the .exe is standalone.
     add_includedirs("vendor/webview2/include")
     add_linkdirs("vendor/webview2/lib")
-    add_links("WebView2Loader.dll")
+    add_links("WebView2LoaderStatic")
 
     add_syslinks("user32", "shell32", "advapi32", "winmm", "dwmapi",
                  "ole32", "oleaut32", "version")
@@ -24,10 +24,5 @@ target("capitalizer")
                 "WINVER=0x0A00", "_WIN32_WINNT=0x0A00")
     add_cxflags("/utf-8")
 
-    -- GUI subsystem: no console window pops up when it runs in the background.
+    -- GUI subsystem so no console window appears.
     add_ldflags("/subsystem:windows", {force = true})
-
-    -- WebView2Loader.dll must sit next to the .exe at runtime.
-    after_build(function (target)
-        os.cp("vendor/webview2/lib/WebView2Loader.dll", target:targetdir())
-    end)

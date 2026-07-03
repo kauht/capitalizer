@@ -2,7 +2,7 @@
 
 namespace feature {
 
-bool IsAutostartEnabled();
-void SetAutostart(bool enable);
+    bool IsAutostartEnabled();
+    void SetAutostart(bool enable);
 
 }

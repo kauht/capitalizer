@@ -2,8 +2,8 @@
 
 namespace app {
 
-inline constexpr wchar_t kName[] = L"Capitalizer";
+    inline constexpr wchar_t kName[] = L"Capitalizer";
 
-enum class Mode { Upper, Lower };
+    enum class Mode { Upper, Lower };
 
 }

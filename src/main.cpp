@@ -293,7 +293,10 @@ void AddTrayIcon() {
     g_nid.uID              = 1;
     g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
+    g_nid.hIcon            = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
+        MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+        GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     lstrcpynW(g_nid.szTip, L"Capitalizer — left-click for settings", 128);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     g_nid.uVersion = NOTIFYICON_VERSION_4;
@@ -399,7 +402,8 @@ body {
 }
 .panel { height: 100%; display: flex; flex-direction: column;
   padding: 20px 22px 16px; background: rgba(20,20,24,0.12); }
-.header { margin-bottom: 12px; }
+.header { margin-bottom: 14px; display: flex; align-items: center; gap: 12px; }
+.logo { width: 36px; height: 36px; border-radius: 9px; flex: none; }
 .title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
 .subtitle { font-size: 12px; color: #9a9aa4; margin-top: 3px; }
 .rows { display: flex; flex-direction: column; }
@@ -428,8 +432,11 @@ body {
 </style></head><body>
 <div class="panel">
   <div class="header">
-    <div class="title">Capitalizer</div>
-    <div class="subtitle">Set the hotkeys that change your selected text's case.</div>
+    <svg class="logo" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#2a2f3a" stroke="rgba(255,255,255,0.12)"/><path d="M13 8 V28 M13 18 L24 8 M13 18 L24 28" stroke="#9fb6dc" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+    <div>
+      <div class="title">Capitalizer</div>
+      <div class="subtitle">Set the hotkeys that change your selected text's case.</div>
+    </div>
   </div>
   <div class="rows">
     <div class="row"><div class="label">UPPERCASE</div><div class="hk" id="hkU" tabindex="0">Unset</div></div>

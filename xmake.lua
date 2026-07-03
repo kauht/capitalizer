@@ -7,7 +7,7 @@ set_warnings("all")
 
 target("capitalizer")
     set_kind("binary")
-    add_files("src/main.cpp")
+    add_files("src/main.cpp", "src/app.rc")
 
     -- Vendored WebView2 SDK (headers + dynamic loader import lib).
     add_includedirs("third_party/webview2/include")

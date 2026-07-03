@@ -62,6 +62,7 @@ UINT            g_taskbarMsg  = 0;
 // Current hotkeys (MOD_* flags without MOD_NOREPEAT). Defaults: Page Up / Page Down.
 UINT g_upperVk = VK_PRIOR, g_upperMods = 0;
 UINT g_lowerVk = VK_NEXT,  g_lowerMods = 0;
+bool g_hkRegistered = false;
 
 std::wstring MapCase(const std::wstring& s, DWORD flags) {
     if (s.empty()) return s;
@@ -351,35 +352,41 @@ void SaveHotkeys() {
 }
 
 void RegisterHotkeys() {
-    RegisterHotKey(g_hwnd, HK_UPPER, g_upperMods | MOD_NOREPEAT, g_upperVk);
-    RegisterHotKey(g_hwnd, HK_LOWER, g_lowerMods | MOD_NOREPEAT, g_lowerVk);
+    const bool ok1 = RegisterHotKey(g_hwnd, HK_UPPER, g_upperMods | MOD_NOREPEAT, g_upperVk);
+    const bool ok2 = RegisterHotKey(g_hwnd, HK_LOWER, g_lowerMods | MOD_NOREPEAT, g_lowerVk);
+    g_hkRegistered = ok1 && ok2;
 }
 
-// Try to register new hotkeys; on any failure roll back to the current ones.
+// Global hotkeys are suspended while the settings window is open, so its key
+// picker receives the raw keypress instead of the hotkey firing a transform.
+void UnregisterHotkeys() {
+    UnregisterHotKey(g_hwnd, HK_UPPER);
+    UnregisterHotKey(g_hwnd, HK_LOWER);
+    g_hkRegistered = false;
+}
+
+// Commit the new hotkeys chosen in the settings window (hotkeys are unregistered
+// while it is open). Registers them; on conflict keeps the old ones and warns.
 bool ApplyHotkeys(UINT uVk, UINT uMods, UINT lVk, UINT lMods) {
-    if (uVk == 0 || lVk == 0) {
-        MessageBoxW(nullptr, L"Please choose a key for both hotkeys.",
-                    kAppName, MB_OK | MB_ICONWARNING);
-        return false;
-    }
+    if (uVk == 0 || lVk == 0) return false;
     UnregisterHotKey(g_hwnd, HK_UPPER);
     UnregisterHotKey(g_hwnd, HK_LOWER);
     const bool ok1 = RegisterHotKey(g_hwnd, HK_UPPER, uMods | MOD_NOREPEAT, uVk);
     const bool ok2 = RegisterHotKey(g_hwnd, HK_LOWER, lMods | MOD_NOREPEAT, lVk);
-    if (!ok1 || !ok2) {
-        if (ok1) UnregisterHotKey(g_hwnd, HK_UPPER);
-        if (ok2) UnregisterHotKey(g_hwnd, HK_LOWER);
-        RegisterHotkeys();   // restore the previous (still-current) globals
-        MessageBoxW(nullptr,
-            L"That shortcut is already in use, or both hotkeys are the same. "
-            L"Keeping your previous hotkeys.",
-            kAppName, MB_OK | MB_ICONWARNING);
-        return false;
+    if (ok1 && ok2) {
+        g_upperVk = uVk; g_upperMods = uMods;
+        g_lowerVk = lVk; g_lowerMods = lMods;
+        g_hkRegistered = true;
+        SaveHotkeys();
+        return true;
     }
-    g_upperVk = uVk; g_upperMods = uMods;
-    g_lowerVk = lVk; g_lowerMods = lMods;
-    SaveHotkeys();
-    return true;
+    if (ok1) UnregisterHotKey(g_hwnd, HK_UPPER);
+    if (ok2) UnregisterHotKey(g_hwnd, HK_LOWER);
+    g_hkRegistered = false;
+    MessageBoxW(nullptr,
+        L"That shortcut is already in use, or both hotkeys are the same. Pick another.",
+        kAppName, MB_OK | MB_ICONWARNING | MB_TOPMOST);
+    return false;
 }
 
 constexpr wchar_t kSettingsClass[] = L"CapitalizerSettingsWnd";
@@ -432,7 +439,7 @@ body {
 </style></head><body>
 <div class="panel">
   <div class="header">
-    <svg class="logo" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#2a2f3a" stroke="rgba(255,255,255,0.12)"/><path d="M13 8 V28 M13 18 L24 8 M13 18 L24 28" stroke="#9fb6dc" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+    <img class="logo" src="data:image/png;base64,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">
     <div>
       <div class="title">Capitalizer</div>
       <div class="subtitle">Set the hotkeys that change your selected text's case.</div>
@@ -635,6 +642,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             g_webController.Reset();
             g_webView.Reset();
             g_settingsHwnd = nullptr;
+            if (!g_hkRegistered) RegisterHotkeys();   // restore suspended hotkeys
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -665,11 +673,12 @@ void ShowSettings() {
     const int x = work.left + (work.right - work.left - w) / 2;
     const int y = work.top + (work.bottom - work.top - h) / 2;
 
-    g_settingsHwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClass, L"Capitalizer",
-                                     WS_POPUP, x, y, w, h, nullptr, nullptr,
+    g_settingsHwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSettingsClass,
+                                     L"Capitalizer", WS_POPUP, x, y, w, h, nullptr, nullptr,
                                      GetModuleHandleW(nullptr), nullptr);
     if (!g_settingsHwnd) return;
 
+    UnregisterHotkeys();   // let the key picker capture Page Up/Down etc. directly
     ApplyAcrylic(g_settingsHwnd);
     ShowWindow(g_settingsHwnd, SW_SHOW);
     SetForegroundWindow(g_settingsHwnd);

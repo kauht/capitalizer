@@ -408,9 +408,9 @@ body {
   user-select: none; -webkit-user-select: none;
 }
 .panel { height: 100%; display: flex; flex-direction: column;
-  padding: 20px 22px 16px; background: rgba(20,20,24,0.12); }
+  padding: 20px 22px 16px; background: rgba(18,18,22,0.86); }
 .header { margin-bottom: 14px; display: flex; align-items: center; gap: 12px; }
-.logo { width: 36px; height: 36px; border-radius: 9px; flex: none; }
+.logo { width: 48px; height: 48px; border-radius: 12px; flex: none; }
 .title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
 .subtitle { font-size: 12px; color: #9a9aa4; margin-top: 3px; }
 .rows { display: flex; flex-direction: column; }
@@ -453,7 +453,6 @@ body {
   </div>
   <div class="footer">
     <div class="hint">Click a field, then press your shortcut</div>
-    <button class="btn" id="cancel">Cancel</button>
     <button class="btn primary" id="save">Save</button>
   </div>
 </div>
@@ -495,7 +494,6 @@ document.getElementById('hkU').onclick=function(){ startCap('hkU'); };
 document.getElementById('hkL').onclick=function(){ startCap('hkL'); };
 document.getElementById('tg').onclick=function(){ st.autostart=!st.autostart; render(); };
 document.getElementById('save').onclick=doSave;
-document.getElementById('cancel').onclick=function(){ vp.postMessage('cancel'); };
 function doSave(){ vp.postMessage('save|'+st.hkU.vk+'|'+st.hkU.mods+'|'+st.hkL.vk+'|'+st.hkL.mods+'|'+(st.autostart?1:0)); }
 document.addEventListener('keydown', function(e){
   if(capturing){
@@ -538,7 +536,7 @@ void ApplyAcrylic(HWND hwnd) {
         auto setca = reinterpret_cast<SetWindowCompositionAttributeFn>(
             GetProcAddress(user32, "SetWindowCompositionAttribute"));
         if (setca) {
-            ACCENT_POLICY accent = { 4, 0, 0xB0161618, 0 };  // acrylic blur + dark ABGR tint
+            ACCENT_POLICY accent = { 4, 0, 0xE0161618, 0 };  // acrylic blur + dark ABGR tint
             WINCOMPATTRDATA data = { 19, &accent, sizeof(accent) };
             setca(hwnd, &data);
         }
@@ -666,17 +664,26 @@ void ShowSettings() {
     }
 
     const UINT dpi = GetDpiForSystem();
-    const int w = MulDiv(480, dpi, 96);
-    const int h = MulDiv(300, dpi, 96);
+    const DWORD style = WS_CAPTION | WS_SYSMENU;
+    RECT rc = { 0, 0, MulDiv(480, dpi, 96), MulDiv(300, dpi, 96) };
+    AdjustWindowRectExForDpi(&rc, style, FALSE, WS_EX_TOPMOST, dpi);
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
     RECT work;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const int x = work.left + (work.right - work.left - w) / 2;
     const int y = work.top + (work.bottom - work.top - h) / 2;
 
-    g_settingsHwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSettingsClass,
-                                     L"Capitalizer", WS_POPUP, x, y, w, h, nullptr, nullptr,
-                                     GetModuleHandleW(nullptr), nullptr);
+    const HMODULE inst = GetModuleHandleW(nullptr);
+    g_settingsHwnd = CreateWindowExW(WS_EX_TOPMOST, kSettingsClass, L"Capitalizer",
+                                     style, x, y, w, h, nullptr, nullptr, inst, nullptr);
     if (!g_settingsHwnd) return;
+
+    SendMessageW(g_settingsHwnd, WM_SETICON, ICON_BIG,
+                 reinterpret_cast<LPARAM>(LoadIconW(inst, MAKEINTRESOURCEW(1))));
+    SendMessageW(g_settingsHwnd, WM_SETICON, ICON_SMALL,
+                 reinterpret_cast<LPARAM>(static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1),
+                     IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                     LR_DEFAULTCOLOR))));
 
     UnregisterHotkeys();   // let the key picker capture Page Up/Down etc. directly
     ApplyAcrylic(g_settingsHwnd);
